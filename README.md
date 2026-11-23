@@ -34,7 +34,9 @@ Her pencerede çalışır, program odakta olmasa da geçerlidir.
 | **Ctrl+Alt+F10** | Düzenleme modunu aç/kapat |
 | **Ctrl+Alt+F12** | Programı kapat |
 
-**Düzenleme modu:** Gösterge arkasında koyu bir panelle belirir. Sürükleyerek taşıyabilir, sağ tıkla menüyü açabilirsin (Kilitle, Konumu sıfırla, PawnIO kur, Çıkış). Tekrar Ctrl+Alt+F10 ile kilitlenir ve yine tıklanamaz olur. Taşıdığın konum kaydedilir.
+**Düzenleme modu:** Gösterge arkasında koyu bir panelle belirir. Sürükleyerek taşıyabilir, sağ tıkla menüyü açabilirsin (Kilitle, Düzenlerken her zaman üstte tut, Konumu sıfırla, PawnIO kur, Çıkış). Tekrar Ctrl+Alt+F10 ile kilitlenir ve yine tıklanamaz olur. Taşıdığın konum kaydedilir.
+
+**Üstte kalma:** Kilitliyken gösterge her zaman diğer pencerelerin üstündedir. Düzenleme modunda ise normal pencere gibi davranır, böylece sağ tık menüsü üstte kalır. Düzenlerken de göstergenin her zaman üstte durmasını istersen menüdeki "Düzenlerken her zaman üstte tut" seçeneğini işaretle (seçim kaydedilir).
 
 ## Gereksinimler
 

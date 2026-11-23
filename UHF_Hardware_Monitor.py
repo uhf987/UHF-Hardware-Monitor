@@ -331,6 +331,38 @@ def work_area():
     return None
 
 
+def corner_anchor():
+    """(sağ, alt): ekranın sağ alt köşesi, görev çubuğunun (saatin) hemen üstü.
+    Önce görev çubuğunun gerçek konumuna bakar, olmazsa çalışma alanını, o da olmazsa ekran boyutunu kullanır."""
+    user32 = ctypes.windll.user32
+    right, bottom = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)  # ana ekran
+    wa = work_area()
+    if wa:
+        right, bottom = wa[2], wa[3]
+    try:
+        from ctypes import wintypes
+        hwnd = user32.FindWindowW("Shell_TrayWnd", None)
+        if hwnd:
+            r = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(r))
+            if (r.right - r.left) >= (r.bottom - r.top) and r.top > user32.GetSystemMetrics(1) // 2:
+                bottom = r.top  # alt kenardaki yatay görev çubuğunun üst çizgisi
+    except Exception:
+        pass
+    return right, bottom
+
+
+def window_rect(hwnd):
+    """Pencerenin gerçek ekran konumu (sol, üst, sağ, alt) ya da None."""
+    try:
+        from ctypes import wintypes
+        r = wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r))
+        return r.left, r.top, r.right, r.bottom
+    except Exception:
+        return None
+
+
 def get_hwnd(widget):
     """Tk kök penceresinin gerçek HWND'si."""
     from ctypes import wintypes
@@ -449,6 +481,10 @@ class App:
         self.edit = False  # True: taşınabilir + menü açılır, False: tıklanamaz
         self._moved = False
         self._hk_prev = {"edit": False, "quit": False}
+        self._menu_open = False  # menü açıkken pencereyi öne alma
+        self._target = None
+        # Düzenleme modunda varsayılan: normal pencere gibi davran (menü üstte kalsın)
+        self.edit_topmost = tk.BooleanVar(value=bool(self.cfg.get("edit_topmost", False)))
 
         keys = [k for k in OVERLAY_ROWS if HAS_NVML or k not in ("gpu", "vram")]
         self.overlay = Overlay(self.root, keys, self.scale)
@@ -467,6 +503,8 @@ class App:
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label=f"Kilitle / tıklanamaz yap  ({HOTKEY_EDIT_TEXT})",
                               command=self.toggle_edit)
+        self.menu.add_checkbutton(label="Düzenlerken her zaman üstte tut", variable=self.edit_topmost,
+                                  command=self.toggle_edit_topmost)
         self.menu.add_command(label="Konumu sıfırla", command=self.reset_position)
         self.menu.add_command(label="PawnIO sürücüsünü kur…", command=self.menu_install_pawnio)
         self.menu.add_separator()
@@ -488,13 +526,14 @@ class App:
 
     # ----- Konum / görünüm -----
     def default_pos(self, w, h):
-        """Sağ alt köşe: görev çubuğunun (saatin) hemen üstü."""
+        """Sağ alt köşe: görev çubuğunun (saatin) hemen üstü, köşeye tam hizalı."""
         mx, my = int(OVERLAY_MARGIN_X * self.scale), int(OVERLAY_MARGIN_Y * self.scale)
-        wa = work_area()
-        if wa:
-            return wa[2] - w - mx, wa[3] - h - my
-        return (self.root.winfo_screenwidth() - w - mx,
-                self.root.winfo_screenheight() - h - my - int(48 * self.scale))
+        try:
+            right, bottom = corner_anchor()
+        except Exception:
+            right = self.root.winfo_screenwidth()
+            bottom = self.root.winfo_screenheight() - int(48 * self.scale)
+        return right - w - mx, bottom - h - my
 
     def apply_overlay(self):
         self.root.attributes("-transparentcolor", OV_KEY)  # arka plan tamamen şeffaf
@@ -504,27 +543,39 @@ class App:
         self._apply_clickthrough()
         self.raise_window()
 
+    def _target_xy(self, w, h):
+        """Pencerenin olması gereken konum: kayıtlı konum varsa o, yoksa sağ alt köşe."""
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        pos = self.cfg.get(POS_KEY)
+        x, y = pos if pos else self.default_pos(w, h)
+        return max(0, min(int(x), sw - w)), max(0, min(int(y), sh - h))  # ekran dışında kalmasın
+
     def place(self):
         """Pencereyi konumlandırır (varsayılan: sağ alt köşe, görev çubuğunun hemen üstü)."""
         self.root.update_idletasks()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         pos = self.cfg.get(POS_KEY)
-        x, y = pos if pos else self.default_pos(w, h)
-        x, y = max(0, min(int(x), sw - w)), max(0, min(int(y), sh - h))  # ekran dışında kalmasın
+        x, y = self._target_xy(w, h)
+        self._target = (x, y, w, h)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         try:  # Tk'ya güvenmeden doğrudan Win32 ile de yerleştir
             from ctypes import wintypes
             user32 = ctypes.windll.user32
             user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                             ctypes.c_int, ctypes.c_int, wintypes.UINT]
-            user32.SetWindowPos(get_hwnd(self.root), wintypes.HWND(-1), x, y, w, h, 0x0010)  # TOPMOST, NOACTIVATE
+            user32.SetWindowPos(get_hwnd(self.root), wintypes.HWND(-1 if self._want_topmost() else -2),
+                                x, y, w, h, 0x0010)  # TOPMOST/NOTOPMOST, NOACTIVATE
         except Exception:
             pass
-        try:  # teşhis kaydı (konum sorunu olursa buna bakılır)
+        self._dbg = getattr(self, "_dbg", 0) + 1
+        try:  # teşhis kaydı (konum sorunu olursa buna bakılır); dosya şişmesin diye sınırlı
+            if self._dbg > 40:
+                return
             with open(DEBUG_FILE, "a", encoding="utf-8") as f:
                 f.write(time.strftime("[%H:%M:%S] ") + f"ekran={sw}x{sh} pencere={w}x{h} "
-                        f"olcek={self.scale:.2f} calisma_alani={work_area()} kayitli={pos} -> x={x} y={y}\n")
+                        f"olcek={self.scale:.2f} calisma_alani={work_area()} koseler={corner_anchor()} "
+                        f"kayitli={pos} -> hedef x={x} y={y} | gercek={window_rect(get_hwnd(self.root))}\n")
         except Exception:
             pass
 
@@ -550,22 +601,45 @@ class App:
         save_config(self.cfg)
         self.apply_overlay()
 
+    def _want_topmost(self):
+        """Kilitliyken her zaman üstte; düzenlerken yalnızca seçenek açıksa."""
+        return (not self.edit) or self.edit_topmost.get()
+
     def raise_window(self):
-        """Pencereyi tekrar en üste al (odağı çalmadan)."""
+        """Pencerenin z-sırasını duruma göre ayarlar (odağı çalmadan)."""
+        top = self._want_topmost()
         try:
             from ctypes import wintypes
             user32 = ctypes.windll.user32
             hwnd = get_hwnd(self.root)
             user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                             ctypes.c_int, ctypes.c_int, wintypes.UINT]
-            # HWND_TOPMOST=-1; SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE
-            user32.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+            # HWND_TOPMOST=-1 / HWND_NOTOPMOST=-2; SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE
+            user32.SetWindowPos(hwnd, wintypes.HWND(-1 if top else -2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
         except Exception:
-            self.root.attributes("-topmost", True)
+            self.root.attributes("-topmost", top)
 
     def _keep_on_top(self):
-        self.raise_window()
+        # Menü açıkken veya düzenlerken (seçenek kapalıysa) öne alma; menü arkada kalmasın
+        if self._want_topmost() and not self._menu_open:
+            self.raise_window()
+        # Kilitliyken pencere hedef konumda değilse (Windows/Tk kaydırdıysa, görev çubuğu geç
+        # yüklendiyse, çözünürlük değiştiyse) kendini yeniden doğru yere alır.
+        if not self.edit and not self._menu_open:
+            try:
+                w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+                x, y = self._target_xy(w, h)
+                rect = window_rect(get_hwnd(self.root))
+                if rect is None or abs(rect[0] - x) > 2 or abs(rect[1] - y) > 2 or (x, y, w, h) != self._target:
+                    self.place()
+            except Exception:
+                pass
         self.root.after(1000, self._keep_on_top)
+
+    def toggle_edit_topmost(self):
+        self.cfg["edit_topmost"] = bool(self.edit_topmost.get())
+        save_config(self.cfg)
+        self.raise_window()
 
     def _poll_hotkeys(self):
         for name, vk in (("edit", HOTKEY_EDIT_VK), ("quit", HOTKEY_QUIT_VK)):
@@ -583,10 +657,12 @@ class App:
         self.root.destroy()
 
     def _popup_menu(self, e):
+        self._menu_open = True
         try:
             self.menu.tk_popup(e.x_root, e.y_root)
         finally:
             self.menu.grab_release()
+            self._menu_open = False
 
     # ----- PawnIO kurulum akışı -----
     def _ask(self, title, text):
@@ -594,7 +670,7 @@ class App:
         try:
             return messagebox.askyesno(title, text, parent=self.root)
         finally:
-            self.root.attributes("-topmost", True)
+            self.raise_window()
 
     def offer_pawnio(self):
         ok = self._ask(
