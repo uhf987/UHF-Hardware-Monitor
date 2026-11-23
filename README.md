@@ -68,12 +68,27 @@ CPU sıcaklığı okumak için PawnIO gerekir. Kurulu değilse program ilk açı
 
 ## EXE oluşturma
 
-1. `UHF_Hardware_Monitor.py`, `build_exe.bat` ve DLL'leri aynı klasöre koy.
-2. **Önce** bu klasörü Windows Defender dışlamalarına ekle (Windows Güvenliği → Virüs ve tehdit koruması → Ayarları yönet → Dışlamalar). Aksi halde antivirüs oluşan exe'yi silip boş bırakabilir.
-3. `build_exe.bat` dosyasına çift tıkla.
-4. Sonuç: `dist\UHF_Hardware_Monitor\UHF_Hardware_Monitor.exe`
+1. Gerekli paketleri kur:
+   ```
+   python -m pip install --upgrade pyinstaller psutil nvidia-ml-py pythonnet
+   ```
+2. `UHF_Hardware_Monitor.py` ve 5 DLL'yi aynı klasöre koy.
+3. **Önce** bu klasörü Windows Defender dışlamalarına ekle (Windows Güvenliği → Virüs ve tehdit koruması → Ayarları yönet → Dışlamalar). Aksi halde antivirüs oluşan exe'yi silip boş bırakabilir.
+4. CMD'yi aç ve klasöre geç (komutu yanlış klasörde çalıştırırsan DLL'ler bulunamaz):
+   ```
+   cd /d "C:\klasörün\yolu"
+   dir
+   ```
+   `dir` çıktısında `UHF_Hardware_Monitor.py` ve DLL'ler görünmeli.
+5. Derleme komutunu çalıştır:
+   ```
+   python -m PyInstaller --noconfirm --clean --onedir --windowed --name UHF_Hardware_Monitor --uac-admin --hidden-import pynvml --hidden-import clr --collect-all pythonnet --collect-all clr_loader --add-data "LibreHardwareMonitorLib.dll;." --add-data "System.Buffers.dll;." --add-data "System.Memory.dll;." --add-data "System.Numerics.Vectors.dll;." --add-data "System.Runtime.CompilerServices.Unsafe.dll;." UHF_Hardware_Monitor.py
+   ```
+6. Sonuç: `dist\UHF_Hardware_Monitor\UHF_Hardware_Monitor.exe`
 
-Çıktı tek dosya değil bir klasördür; exe'yi tek başına taşıma, klasörün tamamını taşı. Exe her açılışta yönetici izni ister (`--uac-admin`). İstersen aynı klasöre `icon.ico` koyarak ikon ekleyebilirsin.
+Çıktı tek dosya değil bir klasördür; exe'yi tek başına taşıma, klasörün tamamını taşı. Exe her açılışta yönetici izni ister (`--uac-admin`). İstersen komuta `--icon icon.ico` ekleyerek ikon ekleyebilirsin.
+
+Derleme sırasında program çalışıyorsa `dist` klasörü silinemez ve hata alırsın. Önce programı kapat (Ctrl+Alt+F12 veya `taskkill /f /im UHF_Hardware_Monitor.exe`).
 
 ## Ayarlar
 
