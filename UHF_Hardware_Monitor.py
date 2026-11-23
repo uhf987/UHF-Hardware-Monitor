@@ -1,7 +1,14 @@
 """
 UHF Hardware Monitor - ComfyUI'den bağımsız, küçük Windows sistem monitörü.
 
-Gösterdikleri: CPU %, CPU sıcaklığı, RAM, GPU %, VRAM, GPU sıcaklığı, Disk
+Gösterdikleri: CPU % + sıcaklık, RAM, GPU % + sıcaklık, VRAM, Disk
+
+Ekranın sağ altında (saatin hemen üstünde) arka plansız, yarı saydam ve
+TIKLANAMAZ bir gösterge olarak durur; fare tıklamaları altındaki pencereye geçer.
+
+Kısayollar (her yerde çalışır):
+  Ctrl+Alt+F10 : düzenleme modu aç/kapat (sürükleyip taşı, sağ tık menü)
+  Ctrl+Alt+F12 : programı kapat
 
 - CPU/RAM/Disk  : psutil
 - NVIDIA GPU    : pynvml (nvidia-ml-py)
@@ -12,8 +19,6 @@ Gösterdikleri: CPU %, CPU sıcaklığı, RAM, GPU %, VRAM, GPU sıcaklığı, D
 Gerekenler:
   pip install psutil nvidia-ml-py pythonnet
   LibreHardwareMonitorLib.dll (+ yanındaki diğer .dll'ler) bu dosyanın yanında.
-
-Kullanım: sol tık sürükle, sağ tık menü (Her zaman üstte / Çıkış).
 """
 import ctypes
 import json
@@ -25,6 +30,7 @@ import time
 import traceback
 import webbrowser
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import messagebox
 
 import psutil
@@ -54,35 +60,29 @@ DLL_NAME = "LibreHardwareMonitorLib.dll"
 AUTO_ELEVATE = True  # yönetici değilse UAC ile kendini yeniden başlat
 DISK_PATH = "C:\\"
 REFRESH_MS = 1000
-COMPACT_LABEL_PT = 7   # görev çubuğu modunda üstteki küçük başlık yazısı (pt)
-COMPACT_VALUE_PT = 9   # alttaki değer yazısı (pt)
-TRAY_RESERVE = 360     # görev çubuğu modunda sağ taraftan bırakılan boşluk (saat/tepsi için, px)
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), "uhf_hardware_monitor.json")
-
-
-def detect_light_taskbar():
-    """Windows görev çubuğu açık temada mı? (koyu tema varsayılan)"""
-    try:
-        import winreg
-        key = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
-            return winreg.QueryValueEx(k, "SystemUsesLightTheme")[0] == 1
-    except Exception:
-        return False
-
-
-if detect_light_taskbar():
-    BG, TRACK, FG, DIM, ACCENT = "#f3f3f3", "#d0d4d9", "#1b1b1b", "#5f6368", "#2f5fd0"
-    LEVELS = ("#2e7d32", "#b26a00", "#c62828")
-else:
-    BG, TRACK, FG, DIM, ACCENT = "#1e2327", "#3a4148", "#d8dee4", "#8b949e", "#7aa2f7"
-    LEVELS = ("#4caf50", "#ffb300", "#e53935")
-FONT = ("Segoe UI", 9)
-BAR_W, BAR_H = 110, 12
 LOG_FILE = os.path.join(os.path.expanduser("~"), "uhf_hardware_monitor_error.log")
+DEBUG_FILE = os.path.join(os.path.expanduser("~"), "uhf_hardware_monitor_debug.log")
 # Kaynaklar winget paket kimliği konusunda çeliştiği için ikisi de sırayla denenir
 WINGET_IDS = ("namazso.PawnIO", "PawnIO.PawnIO")
 PAWNIO_SITE = "https://pawnio.eu"
+
+# --- Görünüm ---
+OVERLAY_ALPHA = 0.75          # 0.0 (görünmez) - 1.0 (tam opak); düşürdükçe daha silik olur
+OVERLAY_PT = 10               # yazı boyutu (pt)
+BAR_W, BAR_H = 70, 8          # renkli çubuğun boyutu (px, 96 DPI'a göre)
+OVERLAY_MARGIN_X = 0          # ekranın sağ kenarından boşluk (px); büyüttükçe sola kayar
+OVERLAY_MARGIN_Y = 0          # görev çubuğunun üstünden boşluk (px); büyüttükçe yukarı çıkar
+OVERLAY_ROWS = ("cpu", "ram", "gpu", "vram", "disk")  # göstermek istemediğini listeden sil
+POS_KEY = "overlay_pos_v3"   # config içindeki konum anahtarı
+OV_KEY = "#010101"            # şeffaf yapılan renk anahtarı (yazılarda kullanılmaz)
+OV_LABEL = "#c3cad2"
+OV_TRACK = "#2b3138"
+OV_LEVELS = ("#5fd068", "#ffc233", "#ff5a52")  # yeşil, sarı, kırmızı
+
+# --- Kısayollar: hepsi Ctrl+Alt+<tuş> ---
+HOTKEY_EDIT_VK, HOTKEY_EDIT_TEXT = 0x79, "Ctrl+Alt+F10"   # 0x79 = F10
+HOTKEY_QUIT_VK, HOTKEY_QUIT_TEXT = 0x7B, "Ctrl+Alt+F12"   # 0x7B = F12
 
 
 # ---------------- Yönetici yardımcıları ----------------
@@ -284,11 +284,17 @@ class CpuTempReader(threading.Thread):
                     pass
 
 
+
+
 # ---------------- Arayüz ----------------
-def level_color(pct):
+WS_EX_LAYERED = 0x00080000
+WS_EX_TRANSPARENT = 0x00000020  # fare olaylarını alttaki pencereye geçirir
+
+
+def ov_level_color(pct):
     if pct is None:
-        return DIM
-    ok, warn, bad = LEVELS
+        return OV_LABEL
+    ok, warn, bad = OV_LEVELS
     return ok if pct < 60 else warn if pct < 85 else bad
 
 
@@ -313,91 +319,140 @@ def save_config(cfg):
         pass
 
 
-def taskbar_rect():
-    """Görev çubuğunun ekran koordinatları (sol, üst, sağ, alt) ya da None."""
+def work_area():
+    """Görev çubuğu hariç çalışma alanı (sol, üst, sağ, alt) ya da None."""
     try:
         from ctypes import wintypes
-        hwnd = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
-        if not hwnd:
-            return None
         rect = wintypes.RECT()
-        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        return rect.left, rect.top, rect.right, rect.bottom
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+            return rect.left, rect.top, rect.right, rect.bottom
     except Exception:
-        return None
+        pass
+    return None
 
 
-class Row:
-    """Tam görünümdeki çubuklu satır."""
+def get_hwnd(widget):
+    """Tk kök penceresinin gerçek HWND'si."""
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetAncestor.restype = wintypes.HWND
+    return user32.GetAncestor(widget.winfo_id(), 2)  # GA_ROOT
 
-    def __init__(self, parent, label, scale=1.0):
+
+def set_exstyle(hwnd, add=0, remove=0):
+    """Pencerenin genişletilmiş stilini değiştirir (tıklanamazlık vb.)."""
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    get = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+    set_ = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+    get.argtypes = [wintypes.HWND, ctypes.c_int]
+    get.restype = ctypes.c_ssize_t
+    set_.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    set_.restype = ctypes.c_ssize_t
+    style = get(hwnd, -20)  # GWL_EXSTYLE
+    set_(hwnd, -20, (style | add) & ~remove)
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    # SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED
+    user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0004 | 0x0010 | 0x0020)
+
+
+def hotkey_down(vk):
+    """Ctrl+Alt+<vk> şu an basılı mı? (pencere odakta olmasa da çalışır)"""
+    try:
+        gs = ctypes.windll.user32.GetAsyncKeyState
+        return all(gs(k) & 0x8000 for k in (0x11, 0x12, vk))
+    except Exception:
+        return False
+
+
+class Overlay:
+    """Arka plansız gösterge: başlık | renkli çubuk | değer. Boşluklar tamamen şeffaf."""
+
+    TITLES = {"cpu": "CPU", "ram": "RAM", "gpu": "GPU", "vram": "VRAM", "disk": "DİSK"}
+    HINT = f"Sürükle  •  {HOTKEY_EDIT_TEXT}: kilitle\n{HOTKEY_QUIT_TEXT}: kapat"
+
+    def __init__(self, parent, keys, scale):
+        self.keys = list(keys)
+        self.font = tkfont.Font(family="Segoe UI", size=OVERLAY_PT, weight="bold")
+        hint_font = tkfont.Font(family="Segoe UI", size=8)
+        pad, gap = int(5 * scale), int(10 * scale)
         self.bar_w, self.bar_h = int(BAR_W * scale), int(BAR_H * scale)
-        f = tk.Frame(parent, bg=BG)
-        f.pack(fill="x", padx=8, pady=2)
-        tk.Label(f, text=label, width=6, anchor="w", fg=FG, bg=BG, font=FONT).pack(side="left")
-        self.canvas = tk.Canvas(f, width=self.bar_w, height=self.bar_h, bg=TRACK, highlightthickness=0)
-        self.canvas.pack(side="left", padx=4)
-        self.bar = self.canvas.create_rectangle(0, 0, 0, self.bar_h, width=0, fill=TRACK)
-        self.value = tk.Label(f, text="—", width=16, anchor="e", fg=FG, bg=BG, font=FONT)
-        self.value.pack(side="left")
+        line_h = self.font.metrics("linespace") + int(3 * scale)
+        label_w = max(self.font.measure(self.TITLES[k]) for k in self.keys)
+        value_w = max(self.font.measure("100%  100°C"), self.font.measure("000.0/000 GB"))
+        hint_lines = self.HINT.split("\n")
+        hint_h = hint_font.metrics("linespace") * len(hint_lines) + int(8 * scale)  # üstte, kilitliyken şeffaf
+        w = max(pad * 2 + label_w + gap + self.bar_w + gap + value_w,
+                max(hint_font.measure(s) for s in hint_lines) + pad * 2)
+        h = hint_h + pad * 2 + line_h * len(self.keys)
 
-    def set(self, pct, text="—"):
-        if pct is None:
-            self.canvas.coords(self.bar, 0, 0, 0, self.bar_h)
-            self.value.config(text=text)
+        self.canvas = tk.Canvas(parent, width=w, height=h, bg=OV_KEY, bd=0, highlightthickness=0)
+        c = self.canvas
+        # Düzenleme modunda görünen panel + ipucu (kilitliyken gizli = tamamen şeffaf)
+        self.panel = c.create_rectangle(0, 0, w - 1, h - 1, fill="#1e2327", outline="#7aa2f7",
+                                        state="hidden")
+        self.hint = c.create_text(w / 2, hint_h / 2, text=self.HINT, fill="#8b949e", font=hint_font,
+                                  justify="center", state="hidden")
+        self.bar_x = pad + label_w + gap
+        self.rows = {}
+        for i, k in enumerate(self.keys):
+            y = hint_h + pad + i * line_h + line_h / 2
+            self._text(pad, y, "w", self.TITLES[k], OV_LABEL)
+            top, bot = y - self.bar_h / 2, y + self.bar_h / 2
+            c.create_rectangle(self.bar_x, top, self.bar_x + self.bar_w, bot,
+                               fill=OV_TRACK, outline="#000000")
+            fill = c.create_rectangle(self.bar_x + 1, top + 1, self.bar_x + 1, bot - 1,
+                                      width=0, fill=OV_LABEL)
+            ids = self._text(w - pad, y, "e", "—", OV_LABEL)
+            self.rows[k] = (ids, fill, top + 1, bot - 1)
+
+    def _text(self, x, y, anchor, text, fill):
+        c = self.canvas
+        ids = [c.create_text(x + dx, y + dy, text=text, anchor=anchor, font=self.font, fill="#000000")
+               for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1))]  # siyah kontür
+        ids.append(c.create_text(x, y, text=text, anchor=anchor, font=self.font, fill=fill))
+        return ids
+
+    def set(self, key, text, bar_pct, color_pct):
+        """text: sağdaki değer, bar_pct: çubuğun dolulığu (%), color_pct: renk seviyesini belirleyen değer."""
+        row = self.rows.get(key)
+        if not row:
             return
-        pct = max(0, min(100, pct))
-        self.canvas.coords(self.bar, 0, 0, self.bar_w * pct / 100, self.bar_h)
-        self.canvas.itemconfig(self.bar, fill=level_color(pct))
-        self.value.config(text=text)
+        ids, fill, y0, y1 = row
+        color = ov_level_color(color_pct)
+        for i in ids[:-1]:
+            self.canvas.itemconfig(i, text=text)
+        self.canvas.itemconfig(ids[-1], text=text, fill=color)
+        pct = max(0, min(100, bar_pct)) if bar_pct is not None else 0
+        x0 = self.bar_x + 1
+        self.canvas.coords(fill, x0, y0, x0 + (self.bar_w - 2) * pct / 100, y1)
+        self.canvas.itemconfig(fill, fill=color)
 
-
-class Col:
-    """Görev çubuğu şeridindeki sütun: üstte küçük başlık, altta renkli değer."""
-
-    def __init__(self, parent, title, width):
-        f = tk.Frame(parent, bg=BG)
-        f.pack(side="left", padx=6)
-        tk.Label(f, text=title, fg=DIM, bg=BG, pady=0,
-                 font=("Segoe UI", COMPACT_LABEL_PT)).pack(anchor="w")
-        self.val = tk.Label(f, text="—", width=width, anchor="w", fg=DIM, bg=BG, pady=0,
-                            font=("Segoe UI", COMPACT_VALUE_PT, "bold"))
-        self.val.pack(anchor="w")
-
-    def set(self, text, pct):
-        self.val.config(text=text, fg=level_color(pct))
+    def set_edit(self, on):
+        state = "normal" if on else "hidden"
+        self.canvas.itemconfig(self.panel, state=state)
+        self.canvas.itemconfig(self.hint, state=state)
 
 
 class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(APP_NAME)
-        self.root.configure(bg=BG)
+        self.root.configure(bg=OV_KEY)
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.scale = self.root.winfo_fpixels("1i") / 96.0
 
         self.cfg = load_config()
-        self.compact = self.cfg.get("mode") == "compact"
-        self.topmost = tk.BooleanVar(value=True)
-        self.compact_var = tk.BooleanVar(value=self.compact)
+        self.edit = False  # True: taşınabilir + menü açılır, False: tıklanamaz
         self._moved = False
+        self._hk_prev = {"edit": False, "quit": False}
 
-        # --- Tam görünüm ---
-        self.full = tk.Frame(self.root, bg=BG)
-        tk.Label(self.full, text=APP_NAME, fg=ACCENT, bg=BG,
-                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=8, pady=(6, 0))
-        self.rows = {k: Row(self.full, k, self.scale) for k in
-                     ("CPU", "CPU °C", "RAM", "GPU", "VRAM", "GPU °C", "Disk")}
-        tk.Frame(self.full, bg=BG, height=4).pack()
-
-        # --- Görev çubuğu şeridi ---
-        self.strip = tk.Frame(self.root, bg=BG)
-        self.cols = {"cpu": Col(self.strip, "CPU", 9), "ram": Col(self.strip, "RAM", 8)}
-        if HAS_NVML:  # NVIDIA kart yoksa GPU/VRAM sütunları yer kaplamasın
-            self.cols["gpu"] = Col(self.strip, "GPU", 9)
-            self.cols["vram"] = Col(self.strip, "VRAM", 8)
-        self.cols["disk"] = Col(self.strip, "DİSK", 4)
+        keys = [k for k in OVERLAY_ROWS if HAS_NVML or k not in ("gpu", "vram")]
+        self.overlay = Overlay(self.root, keys, self.scale)
+        self.overlay.canvas.pack()
 
         # --- CPU sıcaklığı okuyucu / PawnIO ---
         self.cpu_temp = CpuTempReader()
@@ -408,98 +463,130 @@ class App:
         else:
             self.cpu_temp.start()
 
-        # --- Menü ---
+        # --- Menü (yalnızca düzenleme modunda ulaşılır) ---
         self.menu = tk.Menu(self.root, tearoff=0)
-        self.menu.add_checkbutton(label="Görev çubuğu modu", variable=self.compact_var,
-                                  command=self.toggle_mode)
-        self.menu.add_checkbutton(label="Her zaman üstte", variable=self.topmost,
-                                  command=lambda: self.root.attributes("-topmost", self.topmost.get()))
+        self.menu.add_command(label=f"Kilitle / tıklanamaz yap  ({HOTKEY_EDIT_TEXT})",
+                              command=self.toggle_edit)
         self.menu.add_command(label="Konumu sıfırla", command=self.reset_position)
         self.menu.add_command(label="PawnIO sürücüsünü kur…", command=self.menu_install_pawnio)
         self.menu.add_separator()
-        self.menu.add_command(label="Çıkış", command=self.quit)
+        self.menu.add_command(label=f"Çıkış  ({HOTKEY_QUIT_TEXT})", command=self.quit)
 
-        self.root.bind_all("<ButtonPress-1>", self._drag_start)
-        self.root.bind_all("<B1-Motion>", self._drag_move)
-        self.root.bind_all("<ButtonRelease-1>", self._drag_end)
-        self.root.bind_all("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
+        c = self.overlay.canvas
+        c.bind("<ButtonPress-1>", self._drag_start)
+        c.bind("<B1-Motion>", self._drag_move)
+        c.bind("<ButtonRelease-1>", self._drag_end)
+        c.bind("<Button-3>", self._popup_menu)
 
-        self.apply_mode()
+        self.apply_overlay()
+        self.root.after(300, self.place)    # pencere çizildikten sonra tekrar yerleştir
+        self.root.after(1500, self.place)
         psutil.cpu_percent()  # ilk çağrı referans noktası
         self.update()
         self._keep_on_top()
+        self._poll_hotkeys()
 
-    # ----- Görünüm modu / konum -----
-    def _mode_key(self):
-        return "compact" if self.compact else "full"
+    # ----- Konum / görünüm -----
+    def default_pos(self, w, h):
+        """Sağ alt köşe: görev çubuğunun (saatin) hemen üstü."""
+        mx, my = int(OVERLAY_MARGIN_X * self.scale), int(OVERLAY_MARGIN_Y * self.scale)
+        wa = work_area()
+        if wa:
+            return wa[2] - w - mx, wa[3] - h - my
+        return (self.root.winfo_screenwidth() - w - mx,
+                self.root.winfo_screenheight() - h - my - int(48 * self.scale))
 
-    def default_pos(self):
-        self.root.update_idletasks()
-        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        if not self.compact:
-            return 40, 40
-        reserve = int(TRAY_RESERVE * self.scale)
-        rect = taskbar_rect()
-        if rect:
-            left, top, right, bottom = rect
-            if (right - left) >= (bottom - top):  # yatay görev çubuğu: dikeyde ortala
-                return right - w - reserve, top + max(0, ((bottom - top) - h) // 2)
-            return left + max(0, ((right - left) - w) // 2), bottom - h - int(200 * self.scale)
-        return sw - w - reserve, sh - h - 4
-
-    def apply_mode(self):
-        self.full.pack_forget()
-        self.strip.pack_forget()
-        if self.compact:
-            self.strip.pack(padx=4, pady=2)
-            self.root.attributes("-alpha", 1.0)
-        else:
-            self.full.pack()
-            self.root.attributes("-alpha", 0.92)
-        self.root.update_idletasks()
-        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        pos = self.cfg.get("pos", {}).get(self._mode_key())
-        x, y = pos if pos else self.default_pos()
-        x, y = max(0, min(int(x), sw - w)), max(0, min(int(y), sh - h))  # ekran dışında kalmasın
-        self.root.geometry(f"+{x}+{y}")
+    def apply_overlay(self):
+        self.root.attributes("-transparentcolor", OV_KEY)  # arka plan tamamen şeffaf
+        self.overlay.set_edit(self.edit)
+        self.root.attributes("-alpha", 0.95 if self.edit else OVERLAY_ALPHA)
+        self.place()
+        self._apply_clickthrough()
         self.raise_window()
 
-    def toggle_mode(self):
-        self.compact = self.compact_var.get()
-        self.cfg["mode"] = self._mode_key()
-        save_config(self.cfg)
-        self.apply_mode()
+    def place(self):
+        """Pencereyi konumlandırır (varsayılan: sağ alt köşe, görev çubuğunun hemen üstü)."""
+        self.root.update_idletasks()
+        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        pos = self.cfg.get(POS_KEY)
+        x, y = pos if pos else self.default_pos(w, h)
+        x, y = max(0, min(int(x), sw - w)), max(0, min(int(y), sh - h))  # ekran dışında kalmasın
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+        try:  # Tk'ya güvenmeden doğrudan Win32 ile de yerleştir
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            user32.SetWindowPos(get_hwnd(self.root), wintypes.HWND(-1), x, y, w, h, 0x0010)  # TOPMOST, NOACTIVATE
+        except Exception:
+            pass
+        try:  # teşhis kaydı (konum sorunu olursa buna bakılır)
+            with open(DEBUG_FILE, "a", encoding="utf-8") as f:
+                f.write(time.strftime("[%H:%M:%S] ") + f"ekran={sw}x{sh} pencere={w}x{h} "
+                        f"olcek={self.scale:.2f} calisma_alani={work_area()} kayitli={pos} -> x={x} y={y}\n")
+        except Exception:
+            pass
+
+    def _apply_clickthrough(self):
+        """Kilitliyken pencere fare olaylarını görmez (tıklar alttakine geçer)."""
+        if os.name != "nt":
+            return
+        try:
+            hwnd = get_hwnd(self.root)
+            if self.edit:
+                set_exstyle(hwnd, remove=WS_EX_TRANSPARENT)
+            else:
+                set_exstyle(hwnd, add=WS_EX_LAYERED | WS_EX_TRANSPARENT)
+        except Exception:
+            pass
+
+    def toggle_edit(self):
+        self.edit = not self.edit
+        self.apply_overlay()
 
     def reset_position(self):
-        self.cfg.get("pos", {}).pop(self._mode_key(), None)
+        self.cfg.pop(POS_KEY, None)
         save_config(self.cfg)
-        self.apply_mode()
+        self.apply_overlay()
 
     def raise_window(self):
-        """Görev çubuğu öne çıktığında şeridi tekrar en üste al (odağı çalmadan)."""
+        """Pencereyi tekrar en üste al (odağı çalmadan)."""
         try:
             from ctypes import wintypes
             user32 = ctypes.windll.user32
-            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
-            user32.GetAncestor.restype = wintypes.HWND
+            hwnd = get_hwnd(self.root)
             user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                             ctypes.c_int, ctypes.c_int, wintypes.UINT]
-            hwnd = user32.GetAncestor(self.root.winfo_id(), 2)  # GA_ROOT
             # HWND_TOPMOST=-1; SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE
             user32.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
         except Exception:
             self.root.attributes("-topmost", True)
 
     def _keep_on_top(self):
-        if self.compact or self.topmost.get():
-            self.raise_window()
+        self.raise_window()
         self.root.after(1000, self._keep_on_top)
+
+    def _poll_hotkeys(self):
+        for name, vk in (("edit", HOTKEY_EDIT_VK), ("quit", HOTKEY_QUIT_VK)):
+            down = hotkey_down(vk)
+            if down and not self._hk_prev[name]:  # sadece basılma anında tetikle
+                if name == "quit":
+                    self.quit()
+                    return
+                self.toggle_edit()
+            self._hk_prev[name] = down
+        self.root.after(80, self._poll_hotkeys)
 
     def quit(self):
         self.cpu_temp.stop()
         self.root.destroy()
+
+    def _popup_menu(self, e):
+        try:
+            self.menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            self.menu.grab_release()
 
     # ----- PawnIO kurulum akışı -----
     def _ask(self, title, text):
@@ -507,7 +594,7 @@ class App:
         try:
             return messagebox.askyesno(title, text, parent=self.root)
         finally:
-            self.root.attributes("-topmost", self.compact or self.topmost.get())
+            self.root.attributes("-topmost", True)
 
     def offer_pawnio(self):
         ok = self._ask(
@@ -545,7 +632,7 @@ class App:
                          f"{PAWNIO_SITE} sayfasını açıp elle kurmak ister misin?"):
                 webbrowser.open(PAWNIO_SITE)
 
-    # ----- Sürükleme (konum modlara göre ayrı kaydedilir) -----
+    # ----- Sürükleme (yalnızca düzenleme modunda olay alır) -----
     def _drag_start(self, e):
         self._moved = False
         self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
@@ -556,7 +643,7 @@ class App:
 
     def _drag_end(self, e):
         if self._moved:
-            self.cfg.setdefault("pos", {})[self._mode_key()] = [self.root.winfo_x(), self.root.winfo_y()]
+            self.cfg[POS_KEY] = [self.root.winfo_x(), self.root.winfo_y()]
             save_config(self.cfg)
             self._moved = False
 
@@ -581,57 +668,29 @@ class App:
                 pass
         return raw
 
-    def render_full(self, d):
-        r = self.rows
-        r["CPU"].set(d["cpu"], f"{d['cpu']:.0f}%")
-        t = d["cpu_t"]
-        if t is not None:
-            r["CPU °C"].set(t, f"{t:.0f} °C")
-        else:
-            st = self.cpu_temp.status
-            r["CPU °C"].set(None, st if st != "ok" else "—")
-        r["RAM"].set(d["ram_pct"], f"{d['ram_used']:.1f}/{d['ram_total']:.0f} GB")
-        if d["disk"] is not None:
-            r["Disk"].set(d["disk"], f"{d['disk']:.0f}%")
-        else:
-            r["Disk"].set(None)
+    def render(self, d):
+        o, t = self.overlay, d["cpu_t"]
+        # Çubuk kullanım yüzdesini gösterir; renk, yüzde ve sıcaklıktan kötü olana göre seçilir.
+        o.set("cpu", f"{d['cpu']:.0f}%" + (f"  {t:.0f}°C" if t is not None else ""),
+              d["cpu"], worst(d["cpu"], t))
+        o.set("ram", f"{d['ram_used']:.1f}/{d['ram_total']:.0f} GB", d["ram_pct"], d["ram_pct"])
         if d["gpu"] is not None:
-            r["GPU"].set(d["gpu"], f"{d['gpu']}%")
-            r["VRAM"].set(d["vram_pct"], f"{d['vram_used']:.1f}/{d['vram_total']:.0f} GB")
-            r["GPU °C"].set(d["gpu_t"], f"{d['gpu_t']} °C")
+            o.set("gpu", f"{d['gpu']}%  {d['gpu_t']}°C", d["gpu"], worst(d["gpu"], d["gpu_t"]))
+            o.set("vram", f"{d['vram_used']:.1f}/{d['vram_total']:.0f} GB", d["vram_pct"], d["vram_pct"])
         else:
-            for k in ("GPU", "VRAM", "GPU °C"):
-                r[k].set(None)
-
-    def render_compact(self, d):
-        c = self.cols
-        t = d["cpu_t"]
-        c["cpu"].set(f"{d['cpu']:.0f}%" + (f" {t:.0f}°" if t is not None else ""), worst(d["cpu"], t))
-        c["ram"].set(f"{d['ram_used']:.1f}/{d['ram_total']:.0f}G", d["ram_pct"])
-        if "gpu" in c:
-            if d["gpu"] is not None:
-                c["gpu"].set(f"{d['gpu']}% {d['gpu_t']}°", worst(d["gpu"], d["gpu_t"]))
-                c["vram"].set(f"{d['vram_used']:.1f}/{d['vram_total']:.0f}G", d["vram_pct"])
-            else:
-                c["gpu"].set("—", None)
-                c["vram"].set("—", None)
+            o.set("gpu", "—", None, None)
+            o.set("vram", "—", None, None)
         if d["disk"] is not None:
-            c["disk"].set(f"{d['disk']:.0f}%", d["disk"])
+            o.set("disk", f"{d['disk']:.0f}%", d["disk"], d["disk"])
         else:
-            c["disk"].set("—", None)
+            o.set("disk", "—", None, None)
 
     def update(self):
         if self.install_result is not None:
             ok, msg = self.install_result
             self.install_result = None
             self._finish_install(ok, msg)
-
-        data = self.collect()
-        if self.compact:
-            self.render_compact(data)
-        else:
-            self.render_full(data)
-
+        self.render(self.collect())
         self.root.after(REFRESH_MS, self.update)
 
     def run(self):
