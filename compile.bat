@@ -18,7 +18,7 @@ set "DEBUG=0"
 rem 1 ise assets, resources, data, images, icons, static, templates, fonts klasorleri otomatik pakete eklenir
 set "AUTO_DATA=1"
 rem Ek Nuitka secenekleri, ornek: --include-package=yt_dlp
-set "EXTRA_OPTS="
+set "EXTRA_OPTS=--windows-uac-admin"
 rem Derlemeden sonra cikti klasorune kopyalanacak ek dosyalar (bosluk ile ayir)
 set "EXTRA_FILES="
 rem ===========================================================================
