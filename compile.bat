@@ -85,6 +85,7 @@ if not defined PLUGIN findstr /i /m /c:"tkinter" *.py >nul 2>&1 && (set "PLUGIN=
 
 rem --- Konsol ---
 set "CONSOLEARG="
+findstr /i /m /c:"webview" *.py >nul 2>&1 && set "GUI=1"
 if "%GUI%"=="1" if "%DEBUG%"=="0" set "CONSOLEARG=--windows-console-mode=disable"
 if "%GUI%"=="1" if "%DEBUG%"=="1" set "CONSOLEARG=--windows-console-mode=attach"
 
